@@ -66,6 +66,11 @@ spec:
             - name: REDIS_PORT
               value: {{ .Values.backend.redis.port | quote }}
             {{- end }}
+            {{- if not .Values.litellm.sslVerify }}
+            # Disable SSL verification for internal services (e.g., KServe with self-signed certs)
+            - name: SSL_VERIFY
+              value: "false"
+            {{- end }}
           resources:
             {{- toYaml .Values.litellm.resources | nindent 12 }}
           livenessProbe:

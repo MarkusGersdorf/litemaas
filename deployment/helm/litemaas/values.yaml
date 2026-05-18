@@ -154,6 +154,11 @@ litellm:
     # Must contain keys: database-url, master-key, ui-username, ui-password
     existingSecret: ""
 
+  # -- Enable SSL verification for model API calls (set to false for self-signed certs)
+  # ⚠️ Security Warning: Only disable for development/testing or when using internal
+  # services with self-signed certificates (e.g., KServe on OpenShift)
+  sslVerify: true
+
   resources:
     requests:
       memory: "512Mi"
