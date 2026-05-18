@@ -70,38 +70,88 @@ litellm:
   # Keep SSL verification enabled
   sslVerify: true
   
-  # Mount OpenShift service CA bundle
-  volumes:
-    - name: service-ca
-      configMap:
-        name: litellm-service-ca
-  
-  volumeMounts:
-    - name: service-ca
-      mountPath: /etc/ssl/certs/service-ca.crt
-      subPath: service-ca.crt
-      readOnly: true
-  
-  env:
+  # Extra environment variables pointing to CA bundle
+  extraEnv:
+    - name: REQUESTS_CA_BUNDLE
+      value: /etc/ssl/certs/kserve-ca-bundle.crt
     - name: SSL_CERT_FILE
-      value: /etc/ssl/certs/service-ca.crt
+      value: /etc/ssl/certs/kserve-ca-bundle.crt
+    - name: CURL_CA_BUNDLE
+      value: /etc/ssl/certs/kserve-ca-bundle.crt
+    - name: PYTHONHTTPSVERIFY
+      value: /etc/ssl/certs/kserve-ca-bundle.crt
+  
+  # Extra volumes - mount ConfigMap containing CA bundle
+  extraVolumes:
+    - name: kserve-ca-bundle
+      configMap:
+        name: kserve-ca-bundle
+        items:
+          - key: ca-bundle.crt
+            path: kserve-ca-bundle.crt
+  
+  # Extra volume mounts - mount the CA bundle file
+  extraVolumeMounts:
+    - name: kserve-ca-bundle
+      mountPath: /etc/ssl/certs/kserve-ca-bundle.crt
+      subPath: kserve-ca-bundle.crt
+      readOnly: true
 ```
 
-Then create the ConfigMap with the annotation:
+Then create the ConfigMap with the CA bundle. You have two options:
+
+**Option A: OpenShift Service CA (auto-injected)**
+
+Create a ConfigMap and let OpenShift inject the service CA bundle automatically:
 
 ```bash
 cat <<EOF | oc apply -f -
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: litellm-service-ca
+  name: kserve-ca-bundle
   namespace: litemaas
   annotations:
     service.beta.openshift.io/inject-cabundle: "true"
+data: {}
 EOF
 ```
 
-**Note**: The ConfigMap will be automatically populated by OpenShift with the service CA bundle.
+**Note**: OpenShift will automatically populate the `service-ca.crt` key. Wait a few seconds, then verify:
+
+```bash
+oc get configmap kserve-ca-bundle -n litemaas -o jsonpath='{.data.service-ca\.crt}' | head -5
+```
+
+If using this option, update your `values.yaml` to reference the correct key:
+
+```yaml
+litellm:
+  extraVolumes:
+    - name: kserve-ca-bundle
+      configMap:
+        name: kserve-ca-bundle
+        items:
+          - key: service-ca.crt  # OpenShift uses this key name
+            path: kserve-ca-bundle.crt
+```
+
+**Option B: Custom CA Bundle**
+
+If you have your own CA certificate (e.g., from KServe or another source), create the ConfigMap manually:
+
+```bash
+# Extract the CA certificate from KServe service
+oc get secret -n istio-system istio-ca-secret -o jsonpath='{.data.ca-cert\.pem}' | base64 -d > kserve-ca.crt
+
+# Or use OpenShift's ingress CA
+oc get secret -n openshift-ingress-operator router-ca -o jsonpath='{.data.tls\.crt}' | base64 -d > kserve-ca.crt
+
+# Create ConfigMap with your CA bundle
+oc create configmap kserve-ca-bundle \
+  --from-file=ca-bundle.crt=kserve-ca.crt \
+  -n litemaas
+```
 
 **For Kustomize deployments**, the chart needs to be enhanced to support this pattern. In the meantime, manually patch the deployment:
 
@@ -161,6 +211,81 @@ When creating or editing a model in LiteMaaS, add to the model's custom paramete
 This will be passed to LiteLLM's model configuration, disabling SSL verification only for that specific model.
 
 **Note**: This feature requires LiteLLM backend support and may not be available in all versions.
+
+## Complete Working Example (Production)
+
+Here's a complete end-to-end example for production deployment with custom CA bundle:
+
+### Step 1: Create ConfigMap with CA Bundle
+
+```bash
+# Extract the CA certificate from your source (example: KServe/Istio)
+oc get secret -n istio-system istio-ca-secret -o jsonpath='{.data.ca-cert\.pem}' | base64 -d > kserve-ca.crt
+
+# Create ConfigMap
+oc create configmap kserve-ca-bundle \
+  --from-file=ca-bundle.crt=kserve-ca.crt \
+  -n litemaas
+```
+
+### Step 2: Update values.yaml
+
+```yaml
+litellm:
+  enabled: true
+  
+  # Keep SSL verification enabled for security
+  sslVerify: true
+  
+  # Inject CA bundle environment variables
+  extraEnv:
+    - name: REQUESTS_CA_BUNDLE
+      value: /etc/ssl/certs/kserve-ca-bundle.crt
+    - name: SSL_CERT_FILE
+      value: /etc/ssl/certs/kserve-ca-bundle.crt
+    - name: CURL_CA_BUNDLE
+      value: /etc/ssl/certs/kserve-ca-bundle.crt
+    - name: PYTHONHTTPSVERIFY
+      value: /etc/ssl/certs/kserve-ca-bundle.crt
+  
+  # Mount ConfigMap as volume
+  extraVolumes:
+    - name: kserve-ca-bundle
+      configMap:
+        name: kserve-ca-bundle
+        items:
+          - key: ca-bundle.crt
+            path: kserve-ca-bundle.crt
+  
+  # Mount CA bundle file into container
+  extraVolumeMounts:
+    - name: kserve-ca-bundle
+      mountPath: /etc/ssl/certs/kserve-ca-bundle.crt
+      subPath: kserve-ca-bundle.crt
+      readOnly: true
+```
+
+### Step 3: Deploy/Upgrade
+
+```bash
+helm upgrade --install litemaas deployment/helm/litemaas/ \
+  -n litemaas \
+  --create-namespace \
+  -f values.yaml
+```
+
+### Step 4: Verify
+
+```bash
+# Check the volume mount
+kubectl exec -n litemaas deployment/litellm -- ls -la /etc/ssl/certs/kserve-ca-bundle.crt
+
+# Check environment variables
+kubectl exec -n litemaas deployment/litellm -- env | grep -E '(SSL_CERT_FILE|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE)'
+
+# View the CA certificate content
+kubectl exec -n litemaas deployment/litellm -- cat /etc/ssl/certs/kserve-ca-bundle.crt | head -5
+```
 
 ## Verification
 
